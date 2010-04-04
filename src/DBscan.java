@@ -5,7 +5,6 @@
  * - 
  */
 
-import gnu.trove.map.hash.THashMap;
 import gnu.trove.set.hash.TIntHashSet;
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
@@ -16,6 +15,8 @@ import java.io.IOException;
 import java.io.Writer;
 import java.util.ArrayList;
 import java.util.BitSet;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.ListIterator;
@@ -31,7 +32,7 @@ public class DBscan {
 
 	private static final int extrapolate_time = 0;
 	private static final long cutoff_time = 0;
-	private static final int max_nodes = 1000000;
+	private static final int max_nodes = 100000;
 	private static final int min_nodes_for_cluster = 100;
 	private static final float eps = 0.1f;
 	
@@ -45,22 +46,26 @@ public class DBscan {
 		
 		File aFile = new File(filename);
 		final int max_time = getMaxTime(aFile);
-		final long size = getDimensions(max_time);
+		final long bitset_size = getDimensions(max_time);
 		
 		final List<BitSet> bitsets = getBitSets(aFile, max_time, max_nodes);
+		LinkedList<BitSet> compare_bitsets = new LinkedList<BitSet>(bitsets);
 		final long total = bitsets.size();
 
-		final List<ArrayList<BitSet>> clusters = Dbscan(bitsets, eps, min_nodes_for_cluster, size);
+		final List<ArrayList<BitSet>> clusters = Dbscan(bitsets, compare_bitsets, eps, min_nodes_for_cluster, bitset_size);
 	
 		//generate a graph for each cluster
 		int total_clustered_nodes = 0;
 		for(List<BitSet> cluster : clusters)
 		{
 			System.out.println("cluster count = " + cluster.size());	
-			generateGraph(cluster, size, outputPath);
+			generateGraph(cluster, bitset_size, outputPath, "Cluster");
 			total_clustered_nodes += cluster.size();
 		}
 	
+		//generate a graph for the unclustered nodes
+		generateGraph(compare_bitsets, bitset_size, outputPath, "Graph of nodes which have not been clustered");
+		
 		//store the number of nodes not present in any cluster
 		writeString(new File(outputPath+"unclustered.size"), Long.toString(total-total_clustered_nodes));
 		
@@ -73,7 +78,7 @@ public class DBscan {
 	 * @param cluster
 	 */
 	
-	public static void generateGraph(List<BitSet> cluster, long size, String outputPath)
+	public static void generateGraph(List<BitSet> cluster, long size, String outputPath, String title)
 	{
 		final long start_seconds= 1258884000; //start time of evanbd's dataset
 		AbstractLeastSquaresOptimizer optimizer = new LevenbergMarquardtOptimizer();
@@ -133,7 +138,7 @@ public class DBscan {
 		"set output \""+name+".png\"\n" +
 		"unset log\n" +
 		"unset label\n" +
-		"set title \"Cluster containing "+ cluster.size() +" nodes. Mean number of samples that nodes appear in: "+nodes_mean_sample+"\"\n" +
+		"set title \""+title+" containing "+ cluster.size() +" nodes.\nMean number of samples that nodes appear in: "+nodes_mean_sample+"\"\n" +
 		"set xtic auto rotate \n" +
 		"set ytic auto\n" +
 		"set key right bottom\n" +
@@ -165,62 +170,50 @@ public class DBscan {
 		}
 	}
 	
-	public static List<ArrayList<BitSet>> Dbscan(List<BitSet> bitsets, double eps, int minPTS, long size)
+	public static List<ArrayList<BitSet>> Dbscan(List<BitSet> bitsets, List<BitSet> compare_bitsets, double eps, int minPTS, long size)
 	{
 		TIntHashSet visited = new TIntHashSet(); 
 		List<ArrayList<BitSet>> clusters = new ArrayList<ArrayList<BitSet>>(); 
 		
 		final long max_error = Math.round(size * eps);
-		int noise = 0;
 		System.out.println("Max error = " + max_error);
 		
-		for(int i=0; i < bitsets.size(); i++)
+		for (BitSet p : bitsets)
 		{
-			BitSet p = bitsets.get(i);
 			if (!visited.contains(p.hashCode()))
 			{
 				visited.add(p.hashCode());
-				//bitsets.remove(i); //remove p from the set
+				List<BitSet> neighborhood = getNeighbours(compare_bitsets, p, max_error, visited);
 				
-				final List<BitSet> neighborhood = getNeighbours(bitsets, p, max_error, visited);
-				
-				//System.out.println(neighborhood.size());
-				
-				if (neighborhood.size() < minPTS)
-				{
-					// p is noise, so don't put it in any cluster
-				}
-				else //neighborhood is large enough, so expand it
+				if (neighborhood.size() >= minPTS)
 				{
 					ArrayList<BitSet> cluster = new ArrayList<BitSet>();
-					expandCluster(p, neighborhood, cluster, clusters, minPTS, bitsets, max_error,visited);
-					if (cluster.size() >= minPTS)
-					{
-						System.out.println("Adding a new cluster...");
-						clusters.add(cluster);
-					}
+					expandCluster(p, neighborhood, cluster, clusters, minPTS, compare_bitsets, max_error, visited);
+					clusters.add(cluster);
+					System.out.println("Found new cluster of size: " + cluster.size());
 				}
 			}
 		}
 		
-		System.out.println("NOISE: " + noise);
 		return clusters;
 	}
 	
 	public static List<BitSet> getNeighbours(List<BitSet> bitsets, BitSet p, long max_error, TIntHashSet visited)
 	{
+		//System.out.println("Runnng getNeighbours with bitsets size: " + bitsets.size());
 		List<BitSet> neighborhood = new LinkedList<BitSet>();
-		
-		//System.out.println("bitset contains this many elements: " + bitsets.size());
 		
 		for(BitSet n : bitsets)
 		{
+			if (!visited.contains(n.hashCode()))
+			{
 				BitSet n_clone = n.get(0, n.size());
 				n_clone.xor(p);
-				//System.out.println("CARDINALITY: " + n.cardinality());
-				
 				if (n_clone.cardinality() < max_error) neighborhood.add(n);
+			}
 		}
+		
+		//System.out.println("done (got: " + neighborhood.size() + ")");
 		
 		return neighborhood;
 	}
@@ -229,6 +222,11 @@ public class DBscan {
 	{
 		C.add(p); //add p to cluster c
 		final ListIterator<BitSet> N_iterator = N.listIterator();
+		HashSet<BitSet> local_visited = new HashSet<BitSet>();
+		
+		local_visited.addAll(N);
+		
+		int last_size = 0;
 		
 		while(N_iterator.hasNext())
 		{
@@ -241,35 +239,30 @@ public class DBscan {
 				{
 					for(BitSet N_prime_element : N_prime)
 					{
-						if (!visited.contains(N_prime_element.hashCode())) {
+						if (!local_visited.contains(N_prime_element)) {
 							N_iterator.add(N_prime_element);
-							visited.add(N_prime_element.hashCode());
 						}
 					}
+				
+					for(BitSet N_prime_element : N_prime)
+					{
+						local_visited.add(N_prime_element);
+					}
+					
 				}
 			}				
-			boolean p_prime_in_cluster = false;
-			for(List<BitSet> cluster : clusters)
-			{
-				if (cluster.contains(p_prime)) p_prime_in_cluster = true;
+		
+			if (N.size() > last_size + 100) {
+				System.out.println("Growing cluster... current size: " + N.size());
+				last_size = N.size();
 			}
-			if (!p_prime_in_cluster) C.add(p_prime);
+		}	
+		
+		for(BitSet p_prime : N)
+		{
+			C.add(p_prime);
+			bitsets.remove(p_prime);
 		}
-		
-		//System.out.println("visited size: " + visited.size());
-		
-		/*
-		expandCluster(P, N, C, eps, MinPts)
-		   add P to cluster C
-		   for each point P' in N 
-		      if P' is not visited
-		         mark P' as visited
-		         N' = getNeighbors(P', eps)
-		         if sizeof(N') >= MinPts
-		            N = N joined with N'
-		      if P' is not yet member of any cluster
-		         add P' to cluster C
-		*/
 	}
 	
 	public static List<BitSet> getBitSets(File aFile, int max_time, int max_nodes)
@@ -277,8 +270,7 @@ public class DBscan {
 		System.out.println("Creating bitsets...");
 		
 		/* Load a dataset */
-		List<BitSet> data = new LinkedList<BitSet>();
-		Map<Long, Integer> IDtoIndex = new THashMap<Long, Integer>(100000); 
+		Map<Long, BitSet> IDtoInstance = new HashMap<Long, BitSet>(100000); 
 		
 		final int hourly_time_interval = 5;
 
@@ -300,21 +292,19 @@ public class DBscan {
 						{
 							final long id = new Long(splitted[1]);
 
-							if (IDtoIndex.keySet().size() < max_nodes || IDtoIndex.containsKey(id))
+							if (IDtoInstance.keySet().size() < max_nodes || IDtoInstance.containsKey(id))
 							{
-								if (!IDtoIndex.containsKey(id))
+								if (!IDtoInstance.containsKey(id))
 								{
 									//System.out.println("creating new bitset: " + getDimensions(max_time));
 									
 									//create a new bitset
 									BitSet instance = new BitSet((int) getDimensions(max_time));
-									
-									data.add(instance);
-									IDtoIndex.put(id, data.indexOf(instance));
+									IDtoInstance.put(id, instance);
 								}	
 
 								//init a certain bit, at a certain location
-								data.get(IDtoIndex.get(id)).set((int)time/hourly_time_interval);
+								IDtoInstance.get(id).set((int)time/hourly_time_interval);
 							}
 						}
 					}
@@ -334,7 +324,7 @@ public class DBscan {
 		
 		System.out.println("Finished creating bitsets!");
 		
-		return data;
+		return new LinkedList(IDtoInstance.values());
 	}
 
 	public static int getMaxTime(File aFile)
