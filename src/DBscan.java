@@ -15,6 +15,7 @@ import java.io.IOException;
 import java.io.Writer;
 import java.util.ArrayList;
 import java.util.BitSet;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedList;
@@ -32,7 +33,7 @@ public class DBscan {
 
 	private static final int extrapolate_time = 0;
 	private static final long cutoff_time = 0;
-	private static final int max_nodes = 100000;
+	private static final int max_nodes = 1000000;
 	private static final int min_nodes_for_cluster = 100;
 	private static final float eps = 0.1f;
 	
@@ -44,33 +45,41 @@ public class DBscan {
 		final String filename = args[0];
 		final String outputPath = args[1];
 		
-		File aFile = new File(filename);
+		final File aFile = new File(filename);
 		final int max_time = getMaxTime(aFile);
 		final long bitset_size = getDimensions(max_time);
 		
 		final List<BitSet> bitsets = getBitSets(aFile, max_time, max_nodes);
-		LinkedList<BitSet> compare_bitsets = new LinkedList<BitSet>(bitsets);
 		final long total = bitsets.size();
 
-		final List<ArrayList<BitSet>> clusters = Dbscan(bitsets, compare_bitsets, eps, min_nodes_for_cluster, bitset_size);
-	
-		//generate a graph for each cluster
-		int total_clustered_nodes = 0;
-		for(List<BitSet> cluster : clusters)
+		final List<IDistanceMeasure> measures = new LinkedList<IDistanceMeasure>();
+		measures.add(new XOR());
+		measures.add(new Jaccard());
+		
+		
+		for(IDistanceMeasure measure : measures)
 		{
-			System.out.println("cluster count = " + cluster.size());	
-			generateGraph(cluster, bitset_size, outputPath, "Cluster");
-			total_clustered_nodes += cluster.size();
+			LinkedList<BitSet> compare_bitsets = new LinkedList<BitSet>(bitsets);
+			final List<ArrayList<BitSet>> clusters = Dbscan(measure, bitsets, compare_bitsets, eps, min_nodes_for_cluster, bitset_size);
+			
+			//generate a graph for each cluster
+			int total_clustered_nodes = 0;
+			for(List<BitSet> cluster : clusters)
+			{
+				System.out.println("cluster count = " + cluster.size());	
+				generateGraph(measure, cluster, bitset_size, outputPath, "Cluster");
+				total_clustered_nodes += cluster.size();
+			}
+		
+			//generate a graph for the unclustered nodes
+			generateGraph(measure, compare_bitsets, bitset_size, outputPath, "Graph of nodes which have not been clustered");
+			
+			//store the number of nodes not present in any cluster
+			writeString(new File(outputPath+measure.getName()+"_unclustered.size"), Long.toString(total-total_clustered_nodes));
+			
+			//store the total number of nodes
+			writeString(new File(outputPath+measure.getName()+"_total.size"), Long.toString(total));
 		}
-	
-		//generate a graph for the unclustered nodes
-		generateGraph(compare_bitsets, bitset_size, outputPath, "Graph of nodes which have not been clustered");
-		
-		//store the number of nodes not present in any cluster
-		writeString(new File(outputPath+"unclustered.size"), Long.toString(total-total_clustered_nodes));
-		
-		//store the total number of nodes
-		writeString(new File(outputPath+"total.size"), Long.toString(total));
 	}
 
 	/**
@@ -78,7 +87,7 @@ public class DBscan {
 	 * @param cluster
 	 */
 	
-	public static void generateGraph(List<BitSet> cluster, long size, String outputPath, String title)
+	public static void generateGraph(IDistanceMeasure measure, List<BitSet> cluster, long size, String outputPath, String title)
 	{
 		final long start_seconds= 1258884000; //start time of evanbd's dataset
 		AbstractLeastSquaresOptimizer optimizer = new LevenbergMarquardtOptimizer();
@@ -104,12 +113,22 @@ public class DBscan {
 		}
 		
 		//calculate mean samples
+		List<Integer> samples = new LinkedList<Integer>();
 		long nodes_mean_sample = 0; //In how many samples are the nodes by average?
 		for(BitSet node : cluster)
 		{
 			nodes_mean_sample += node.cardinality();
+			samples.add(node.cardinality());
 		}
 		nodes_mean_sample = nodes_mean_sample / cluster.size();
+		
+		Collections.sort(samples);
+		int minimum = samples.get(0);
+		int maximum = samples.get(samples.size()-1);
+		int median = samples.get(Math.round(samples.size() / 2));
+		
+		
+		
 		
 		PolynomialFunction function = null;
 		
@@ -130,15 +149,16 @@ public class DBscan {
 		String name = Integer.toString(Math.abs(cluster.hashCode()));
 		
 		//write data to file
-		File outputFileData = new File(outputPath + name + ".data");
+		File outputFileData = new File(outputPath + measure.getName() + "_" + name + ".data");
 		writeString(outputFileData, data);
 	
 		String gnuplot = "set autoscale\n" + 
 		"set terminal png medium\n" +
-		"set output \""+name+".png\"\n" +
+		"set output \"" + measure.getName() + "_" + name+".png\"\n" +
 		"unset log\n" +
 		"unset label\n" +
-		"set title \""+title+" containing "+ cluster.size() +" nodes.\nMean number of samples that nodes appear in: "+nodes_mean_sample+"\"\n" +
+		"set title \""+title+" containing "+ cluster.size() +" nodes.\\nMean number of samples that nodes appear in: "+nodes_mean_sample + "\\n" +
+			"minimum: "+minimum+", maximum: "+maximum+", median: "+median+"\"\n" +
 		"set xtic auto rotate \n" +
 		"set ytic auto\n" +
 		"set key right bottom\n" +
@@ -146,9 +166,9 @@ public class DBscan {
 		"set xlabel \"Time\"\n" +
 		"set xdata time\n" +
 	    "set timefmt \"%s\"\n" +
-		"plot \""+Math.abs(cluster.hashCode())+".data\" using 1:2 with lines\n";
+		"plot \""+ measure.getName() + "_" + Math.abs(cluster.hashCode())+".data\" using 1:2 with lines\n";
 		
-		File outputFileDataGnuPLot = new File(outputPath + Math.abs(cluster.hashCode()) + ".p");
+		File outputFileDataGnuPLot = new File(outputPath + measure.getName() + "_" + Math.abs(cluster.hashCode()) + ".p");
 		writeString(outputFileDataGnuPLot, gnuplot);
 	}
 
@@ -170,12 +190,13 @@ public class DBscan {
 		}
 	}
 	
-	public static List<ArrayList<BitSet>> Dbscan(List<BitSet> bitsets, List<BitSet> compare_bitsets, double eps, int minPTS, long size)
+	public static List<ArrayList<BitSet>> Dbscan(IDistanceMeasure measure, List<BitSet> bitsets, List<BitSet> compare_bitsets, double eps, int minPTS, long size)
 	{
 		TIntHashSet visited = new TIntHashSet(); 
 		List<ArrayList<BitSet>> clusters = new ArrayList<ArrayList<BitSet>>(); 
 		
-		final long max_error = Math.round(size * eps);
+		
+		final double max_error = measure.getMaxError(size, eps); 
 		System.out.println("Max error = " + max_error);
 		
 		for (BitSet p : bitsets)
@@ -183,12 +204,12 @@ public class DBscan {
 			if (!visited.contains(p.hashCode()))
 			{
 				visited.add(p.hashCode());
-				List<BitSet> neighborhood = getNeighbours(compare_bitsets, p, max_error, visited);
+				List<BitSet> neighborhood = getNeighbours(measure, compare_bitsets, p, max_error, visited);
 				
 				if (neighborhood.size() >= minPTS)
 				{
 					ArrayList<BitSet> cluster = new ArrayList<BitSet>();
-					expandCluster(p, neighborhood, cluster, clusters, minPTS, compare_bitsets, max_error, visited);
+					expandCluster(measure, p, neighborhood, cluster, clusters, minPTS, compare_bitsets, max_error, visited);
 					clusters.add(cluster);
 					System.out.println("Found new cluster of size: " + cluster.size());
 				}
@@ -198,7 +219,7 @@ public class DBscan {
 		return clusters;
 	}
 	
-	public static List<BitSet> getNeighbours(List<BitSet> bitsets, BitSet p, long max_error, TIntHashSet visited)
+	public static List<BitSet> getNeighbours(IDistanceMeasure measure, List<BitSet> bitsets, BitSet p, double max_error, TIntHashSet visited)
 	{
 		//System.out.println("Runnng getNeighbours with bitsets size: " + bitsets.size());
 		List<BitSet> neighborhood = new LinkedList<BitSet>();
@@ -207,9 +228,7 @@ public class DBscan {
 		{
 			if (!visited.contains(n.hashCode()))
 			{
-				BitSet n_clone = n.get(0, n.size());
-				n_clone.xor(p);
-				if (n_clone.cardinality() < max_error) neighborhood.add(n);
+				if (measure.acceptable(measure.getDistance(n, p), max_error)) neighborhood.add(n);
 			}
 		}
 		
@@ -218,7 +237,7 @@ public class DBscan {
 		return neighborhood;
 	}
 	
-	public static void expandCluster(BitSet p, List<BitSet> N, ArrayList<BitSet> C, List<ArrayList<BitSet>> clusters, int minPTS, List<BitSet> bitsets, long max_error, TIntHashSet visited)
+	public static void expandCluster(IDistanceMeasure measure, BitSet p, List<BitSet> N, ArrayList<BitSet> C, List<ArrayList<BitSet>> clusters, int minPTS, List<BitSet> bitsets, double max_error, TIntHashSet visited)
 	{
 		C.add(p); //add p to cluster c
 		final ListIterator<BitSet> N_iterator = N.listIterator();
@@ -234,7 +253,7 @@ public class DBscan {
 			if (!visited.contains(p_prime.hashCode()))
 			{
 				visited.add(p_prime.hashCode());
-				final List<BitSet> N_prime = getNeighbours(bitsets, p_prime, max_error, visited);
+				final List<BitSet> N_prime = getNeighbours(measure, bitsets, p_prime, max_error, visited);
 				if (N_prime.size() >= minPTS)
 				{
 					for(BitSet N_prime_element : N_prime)
